@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "industrial-vision-inspection"
-version = "0.1.0"
-description = "Configurable classical-computer-vision inspection pipeline for industrial defects."
+version = "0.2.0"
+description = "Recipe-driven, explainable machine-vision inspection with calibration, metrology, quality gates, and performance evaluation."
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "opencv-python>=4.8"]
 
@@ -15,6 +15,21 @@ inspect-image = "vision_inspection.cli:main"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "--strict-markers"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.coverage.run]
+source = ["vision_inspection"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85
 
 [tool.setuptools.packages.find]
 where = ["src"]
