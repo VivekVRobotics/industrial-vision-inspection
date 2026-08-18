@@ -1,8 +1,7 @@
 """Explainable preprocessing and segmentation primitives.
 
-OpenCV documents morphology as a useful way to suppress or emphasize spatial
-structures. This module keeps those transformations explicit so recipe changes
-are easy to audit and benchmark.
+OpenCV morphology and threshold operators are kept explicit so a recipe can be
+reviewed stage-by-stage and benchmarked without hidden image-processing state.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ class PreprocessConfig:
 
 
 def to_grayscale(image: np.ndarray) -> np.ndarray:
-    """Convert grayscale/BGR/BGRA numeric data to a bounded uint8 image."""
+    """Convert grayscale/BGR/BGRA numeric data to bounded uint8 grayscale."""
     values = np.asarray(image)
     if values.size == 0:
         raise ValueError("image must not be empty")
@@ -48,7 +47,7 @@ def to_grayscale(image: np.ndarray) -> np.ndarray:
         gray = values
     elif values.ndim == 3 and values.shape[2] in {3, 4}:
         code = cv2.COLOR_BGR2GRAY if values.shape[2] == 3 else cv2.COLOR_BGRA2GRAY
-        gray = cv2.cvtColor(values.astype(np.uint8), code)
+        gray = cv2.cvtColor(np.clip(values, 0, 255).astype(np.uint8), code)
     else:
         raise ValueError("image must have shape (H,W), (H,W,3), or (H,W,4)")
     if not np.issubdtype(gray.dtype, np.number):
@@ -66,10 +65,11 @@ def normalize_illumination(gray: np.ndarray, config: PreprocessConfig) -> np.nda
     else:
         filtered = image
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config.background_kernel, config.background_kernel))
-    if config.polarity == "dark":
-        corrected = cv2.morphologyEx(filtered, cv2.MORPH_BLACKHAT, kernel)
-    else:
-        corrected = cv2.morphologyEx(filtered, cv2.MORPH_TOPHAT, kernel)
+    corrected = cv2.morphologyEx(
+        filtered,
+        cv2.MORPH_BLACKHAT if config.polarity == "dark" else cv2.MORPH_TOPHAT,
+        kernel,
+    )
     if config.clahe_clip_limit is not None:
         clahe = cv2.createCLAHE(config.clahe_clip_limit, (config.clahe_grid, config.clahe_grid))
         corrected = clahe.apply(corrected)
@@ -85,30 +85,23 @@ def threshold_image(
     adaptive_c: float = 3.0,
     polarity: str = "positive",
 ) -> np.ndarray:
-    """Segment an 8-bit image using fixed, Otsu, or adaptive thresholding.
-
-    ``polarity='positive'`` extracts high response; ``negative`` extracts low
-    response. Separating segmentation polarity from image polarity makes recipe
-    semantics explicit.
-    """
+    """Segment an 8-bit image using fixed, Otsu, or adaptive thresholding."""
+    if polarity not in {"positive", "negative"}:
+        raise ValueError("polarity must be positive or negative")
     image = to_grayscale(image)
+    threshold_type = cv2.THRESH_BINARY if polarity == "positive" else cv2.THRESH_BINARY_INV
     if mode == "fixed":
         if not 0 <= threshold <= 255:
             raise ValueError("threshold must be in [0,255]")
-        threshold_type = cv2.THRESH_BINARY if polarity == "positive" else cv2.THRESH_BINARY_INV
         _, mask = cv2.threshold(image, threshold, 255, threshold_type)
     elif mode == "otsu":
-        threshold_type = cv2.THRESH_BINARY if polarity == "positive" else cv2.THRESH_BINARY_INV
         _, mask = cv2.threshold(image, 0, 255, threshold_type | cv2.THRESH_OTSU)
     elif mode == "adaptive":
         if adaptive_block < 3 or adaptive_block % 2 == 0:
             raise ValueError("adaptive_block must be odd and >=3")
-        threshold_type = cv2.THRESH_BINARY if polarity == "positive" else cv2.THRESH_BINARY_INV
         mask = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, threshold_type, adaptive_block, adaptive_c)
     else:
         raise ValueError("mode must be fixed, otsu, or adaptive")
-    if polarity not in {"positive", "negative"}:
-        raise ValueError("polarity must be positive or negative")
     return mask
 
 
