@@ -1,1 +1,1 @@
-# industrial-vision-inspection
+# Industrial Vision Inspection
