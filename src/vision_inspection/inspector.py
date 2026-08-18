@@ -11,6 +11,7 @@ import numpy as np
 from .calibration import PixelScale
 from .metrology import RegionMeasurement, measure_regions
 from .preprocessing import PreprocessConfig, apply_morphology, normalize_illumination, threshold_image, to_grayscale
+from .quality import ImageQuality, QualityConfig, assess_image_quality
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class InspectionConfig:
     """An auditable inspection recipe for localized surface defects."""
 
     preprocess: PreprocessConfig = PreprocessConfig()
+    quality: QualityConfig = QualityConfig()
     segmentation_mode: str = "otsu"
     threshold: int = 80
     adaptive_block: int = 31
@@ -33,6 +35,7 @@ class InspectionConfig:
     min_solidity: float | None = None
     reject_border_touching: bool = False
     roi: tuple[int, int, int, int] | None = None
+    reject_bad_image_quality: bool = True
 
     def __post_init__(self) -> None:
         if self.segmentation_mode not in {"fixed", "otsu", "adaptive"}:
@@ -76,12 +79,20 @@ class InspectionResult:
     """Immutable inspection decision and measured evidence."""
 
     passed: bool
+    quality: ImageQuality
     defect_count: int
     defect_fraction: float
     defects: tuple[Defect, ...]
     measurements: tuple[RegionMeasurement, ...]
     image_shape: tuple[int, int]
     roi: tuple[int, int, int, int] | None
+
+    @property
+    def reject_reasons(self) -> tuple[str, ...]:
+        reasons = list(self.quality.failures)
+        if self.defect_count:
+            reasons.append("defect_rule_violation")
+        return tuple(reasons)
 
 
 def _touches_border(bbox: tuple[int, int, int, int], shape: tuple[int, int]) -> bool:
@@ -98,6 +109,7 @@ def inspect_array(
 ) -> InspectionResult:
     """Inspect an image array and return a deterministic, auditable decision."""
     config = config or InspectionConfig()
+    quality = assess_image_quality(image, config.quality)
     gray = to_grayscale(image)
     roi_offset = (0, 0)
     inspected = gray
@@ -155,9 +167,11 @@ def inspect_array(
 
     inspected_area = float(inspected.shape[0] * inspected.shape[1])
     defect_fraction = sum(d.measurement.area_px for d in defects) / inspected_area if inspected_area else 0.0
-    passed = len(defects) <= config.max_defects and defect_fraction <= config.max_defect_fraction
+    defect_pass = len(defects) <= config.max_defects and defect_fraction <= config.max_defect_fraction
+    passed = defect_pass and (quality.passed or not config.reject_bad_image_quality)
     return InspectionResult(
         passed=passed,
+        quality=quality,
         defect_count=len(defects),
         defect_fraction=float(defect_fraction),
         defects=tuple(defects),
