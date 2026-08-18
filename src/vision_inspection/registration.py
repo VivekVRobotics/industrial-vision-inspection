@@ -1,8 +1,9 @@
 """Pose normalization through ECC registration and perspective rectification.
 
-OpenCV's ECC optimizer estimates geometric transforms by maximizing image
-correlation. It is useful for small pose variation after acquisition, but it is
-not a substitute for a physical fixture or a validated fiducial strategy.
+ECC (Enhanced Correlation Coefficient) alignment is useful for small, smooth
+pose variation after image acquisition. It should be bounded by a correlation
+quality gate and validated on representative production fixtures; it is not a
+replacement for mechanical fixturing or fiducials.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class RegistrationResult:
-    """Registered image, transform, score, and iteration diagnostics."""
+    """Registered image, transform, score, motion model, and iteration budget."""
 
     image: np.ndarray
     warp_matrix: np.ndarray
@@ -25,20 +26,31 @@ class RegistrationResult:
 
     @property
     def accepted(self) -> bool:
+        """Return whether the optimizer produced a finite similarity score."""
         return bool(np.isfinite(self.correlation))
 
 
 def _gray(values: np.ndarray) -> np.ndarray:
     image = np.asarray(values)
+    if image.size == 0:
+        raise ValueError("image must not be empty")
     if image.ndim == 2:
         gray = image
     elif image.ndim == 3 and image.shape[2] == 3:
-        gray = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(np.clip(image, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY)
     else:
         raise ValueError("images must be grayscale or BGR")
-    if gray.size == 0:
-        raise ValueError("image must not be empty")
     return np.clip(gray, 0, 255).astype(np.uint8)
+
+
+def _scale_warp(warp: np.ndarray, motion: str) -> np.ndarray:
+    """Scale translation terms when moving an affine/homography warp upward in a pyramid."""
+    scaled = warp.copy()
+    if motion == "homography":
+        scaled[0:2, 2] *= 2.0
+    else:
+        scaled[:, 2] *= 2.0
+    return scaled
 
 
 def register_ecc(
@@ -55,7 +67,9 @@ def register_ecc(
     if motion not in {"translation", "euclidean", "affine", "homography"}:
         raise ValueError("invalid motion model")
     if iterations <= 0 or epsilon <= 0 or pyramid_levels < 1:
-        raise ValueError("iterations and epsilon must be positive; pyramid_levels >=1")
+        raise ValueError("iterations/epsilon must be positive and pyramid_levels >=1")
+    if min_correlation is not None and not -1.0 <= min_correlation <= 1.0:
+        raise ValueError("min_correlation must be in [-1,1]")
     ref = _gray(reference)
     current = _gray(image)
     if ref.shape != current.shape:
@@ -64,33 +78,29 @@ def register_ecc(
         "translation": (cv2.MOTION_TRANSLATION, np.eye(2, 3, dtype=np.float32)),
         "euclidean": (cv2.MOTION_EUCLIDEAN, np.eye(2, 3, dtype=np.float32)),
         "affine": (cv2.MOTION_AFFINE, np.eye(2, 3, dtype=np.float32)),
-        "homography": (cv2.MOTION_HOMOGRAPHY, np.eye(3, dtype=3, dtype=np.float32)),
+        "homography": (cv2.MOTION_HOMOGRAPHY, np.eye(3, 3, dtype=np.float32)),
     }
     mode, warp = modes[motion]
-    if pyramid_levels == 1:
-        reference_pyramid = [ref]
-        image_pyramid = [current]
-    else:
-        reference_pyramid = [ref]
-        image_pyramid = [current]
-        for _ in range(1, pyramid_levels):
-            reference_pyramid.insert(0, cv2.pyrDown(reference_pyramid[0]))
-            image_pyramid.insert(0, cv2.pyrDown(image_pyramid[0]))
+    reference_pyramid = [ref]
+    image_pyramid = [current]
+    for _ in range(1, pyramid_levels):
+        reference_pyramid.insert(0, cv2.pyrDown(reference_pyramid[0]))
+        image_pyramid.insert(0, cv2.pyrDown(image_pyramid[0]))
+
     correlation = float("nan")
     for level, (reference_level, image_level) in enumerate(zip(reference_pyramid, image_pyramid)):
-        scale = 2 ** (pyramid_levels - 1 - level)
         if level > 0:
-            if motion == "homography":
-                warp[:2, 2] *= 2.0
-                warp[:2, :2] = warp[:2, :2]
-            else:
-                warp[:, 2] *= 2.0
+            warp = _scale_warp(warp, motion)
         criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, iterations, epsilon)
-        correlation, warp = cv2.findTransformECC(reference_level, image_level, warp, mode, criteria)
+        try:
+            correlation, warp = cv2.findTransformECC(reference_level, image_level, warp, mode, criteria)
+        except cv2.error as exc:
+            raise RuntimeError(f"ECC registration failed at pyramid level {level}") from exc
         if not np.isfinite(correlation):
             raise RuntimeError("ECC returned a non-finite correlation score")
     if min_correlation is not None and correlation < min_correlation:
         raise RuntimeError(f"registration correlation {correlation:.6f} below minimum {min_correlation:.6f}")
+
     flags = cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
     size = (ref.shape[1], ref.shape[0])
     aligned = cv2.warpPerspective(image, warp, size, flags=flags) if motion == "homography" else cv2.warpAffine(image, warp, size, flags=flags)
