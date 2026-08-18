@@ -1,96 +1,176 @@
 # Industrial Vision Inspection
 
-An explainable, recipe-driven machine-vision inspection toolkit for industrial surface defects, geometric measurement, acquisition quality, calibration, measurement-system analysis, process drift, and inspection-performance benchmarking.
+A traceable, explainable machine-vision inspection toolkit for industrial surface defects, metrology, calibration, acquisition quality, measurement-system analysis, process drift, and statistical benchmarking.
 
-This repository is deliberately **classical-vision first**: every acceptance decision can be traced to image quality, preprocessing, segmentation, morphology, metrology, and explicit recipe thresholds. That keeps failure analysis transparent and provides a controlled foundation for later learned-vision experiments.
+The project is **classical-vision first**. Inspection decisions remain decomposable into acquisition quality, calibration/preprocessing, segmentation, morphology, geometry, and explicit acceptance rules. Learned vision can be added later and benchmarked against the same locked evaluation protocol.
 
-## System architecture
+## Architecture
 
 ```text
 Camera / trigger
-      │
-      ▼
+      |
+      v
 Frame + acquisition metadata
-      │
-      ▼
-Image-quality gate
-      │
-      ▼
+      |
+      v
+Acquisition-quality gate
+      |
+      v
 Calibration / flat-field / registration
-      │
-      ▼
-ROI + preprocessing
-      │
-      ▼
+      |
+      v
+ROI + illumination normalization
+      |
+      v
 Segmentation + morphology
-      │
-      ▼
-Region extraction + metrology
-      │
-      ├───────────────┐
-      ▼               ▼
-Rule-based QA     Golden reference
-      │               │
-      └───────┬───────┘
-              ▼
-       PASS / FAIL + evidence
-              │
-      ┌───────┴────────┐
-      ▼                ▼
-MSA / GR&R        Drift / benchmark
+      |
+      v
+Region metrology
+      |
+      +--------------------+
+      |                    |
+      v                    v
+Rule-based acceptance   Golden reference
+      |                    |
+      +---------+----------+
+                v
+        PASS / FAIL + evidence
+                |
+       +--------+---------+
+       v                  v
+Measurement system    Benchmark / drift
 ```
 
-## Implemented engineering layers
+## What makes this different from a demo detector
 
-### Camera acquisition and triggering
-`Camera` defines a transport-independent acquisition boundary. `TriggeredSequenceCamera` gives deterministic trigger/frame/timestamp behavior for tests and HIL-style control logic. This mirrors modern industrial acquisition systems where triggered capture is a normal operating mode. citeturn400041search3turn400041search12
+The package treats an inspection decision as a **measurement and evidence problem**.
 
-### Acquisition-quality gating
-Images can be rejected as invalid evidence when exposure, contrast, sharpness, or clipping metrics fall outside the recipe. This prevents the system from confusing an unusable frame with a defect-free part.
+An `InspectionResult` records:
 
-### Flat-field calibration
-`build_flat_field()` and `apply_flat_field()` model multiplicative illumination variation from uniform reference frames. The intent is to stabilize the image before defect segmentation rather than forcing segmentation to compensate for illumination artifacts.
+- recipe version and recipe SHA-256;
+- source-image SHA-256;
+- image-quality metrics and failure reasons;
+- diagnostic candidate filtering;
+- defect count and area fraction;
+- geometry and calibrated physical measurements;
+- processing time.
+
+That makes a decision reproducible and auditable instead of reducing it to a boolean.
+
+## Production-oriented modules
+
+### Acquisition
+`acquisition.py` defines a transport-independent camera protocol plus a deterministic triggered source for integration tests. Frames carry trigger, timestamp, exposure, gain, and frame identity.
+
+The production boundary is intentionally vendor-neutral. Hardware SDKs, PLC synchronization, encoder capture, and GenICam/vendor transports belong in adapters rather than the numerical inspection core.
+
+### Image-quality gating
+`quality.py` measures mean, standard deviation, 1st/99th percentiles, Laplacian sharpness, and saturation. A poor frame can be rejected as invalid evidence before a defect-free decision is allowed.
 
 ### Camera calibration
-`CameraCalibration` supports intrinsic calibration, distortion correction, persistence, and image-size validation. `PixelScale` supports planar physical measurements.
+`calibration.py` supports:
 
-`calibrate_charuco()` adds a ChArUco workflow with intrinsic standard deviations and per-view reprojection errors. Current OpenCV documentation recommends ChArUco corners for calibration because they are more accurate than raw marker corners and can tolerate partial board views. citeturn382627search0turn382627search7
+- pinhole intrinsics;
+- distortion;
+- extended calibration diagnostics;
+- per-view reprojection errors;
+- intrinsic parameter standard deviations;
+- quality gates;
+- persistent calibration archives;
+- ChArUco calibration;
+- planar pixel-scale conversion.
 
-### Metrology uncertainty
-`propagate_length_uncertainty()` explicitly propagates pixel-location and pixel-scale uncertainty into a standard uncertainty and an expanded uncertainty. It is intentionally a transparent first-order model rather than a claim of full ISO/GUM compliance.
+OpenCV documents standard calibration and ChArUco workflows, including calibration error diagnostics. See `docs/research-notes.md` for references.
 
-### Registration / pose normalization
-ECC-based registration and perspective rectification reduce false defects caused by small part pose changes.
+### Flat-field correction
+`flat_field.py` builds a normalized illumination field from repeated uniform captures, supports robust median aggregation, reports field non-uniformity, smooths the calibration field, and applies multiplicative correction to 2D/3D images.
 
-### Illumination normalization and segmentation
-The preprocessing layer supports dark-defect black-hat enhancement, light-defect top-hat enhancement, fixed thresholding, Otsu thresholding, and adaptive Gaussian thresholding, followed by explicit opening/closing morphology.
+### Registration
+`registration.py` supports translation, Euclidean, affine, and homography ECC alignment, optional image pyramids, minimum-correlation gates, and four-corner perspective rectification.
 
-### Geometric metrology
-Detected regions expose area, perimeter, centroid, bounding box, aspect ratio, circularity, extent, solidity, and optional calibrated physical dimensions.
+### Preprocessing and segmentation
+`preprocessing.py` supports:
 
-### Golden-sample versioning
-`GoldenSample` stores a SHA-256 digest of the approved image bytes together with recipe version and creation timestamp. This makes golden references traceable instead of silently replacing them in-place.
+- grayscale conversion;
+- Gaussian or median denoising;
+- black-hat / top-hat illumination enhancement;
+- optional CLAHE;
+- fixed thresholding;
+- Otsu thresholding;
+- adaptive Gaussian thresholding;
+- explicit segmentation polarity;
+- opening/closing morphology with controlled iteration count.
 
-### Reference-difference inspection
-Golden-reference residuals provide a second, explainable inspection path for appearance changes that may not fit a fixed defect geometry rule.
+### Metrology
+`metrology.py` reports:
+
+- area/perimeter;
+- centroid/bounding box;
+- aspect ratio;
+- circularity;
+- extent;
+- solidity;
+- equivalent diameter;
+- minimum-area rectangle dimensions and angle;
+- compactness;
+- optional physical dimensions.
+
+### Reference inspection
+`reference.py` compares a registered part against a golden image and reports thresholded localized residuals plus mean/P95/max absolute difference statistics.
+
+### Golden-sample governance
+`golden.py` records image hashes, recipe versions, approval metadata, creation time, and a registry digest. Stored registries are integrity-checked when loaded.
+
+### Uncertainty
+`uncertainty.py` exposes:
+
+- first-order root-sum-square propagation;
+- Monte Carlo propagation;
+- standard and expanded uncertainty;
+- lower/upper reporting bounds;
+- explicit method labels.
+
+The implementation deliberately does **not** claim a complete uncertainty budget. Distortion residuals, fixture motion, target uncertainty, segmentation bias, temperature, and correlated inputs remain application-specific contributors.
 
 ### Measurement-system analysis
-`crossed_grr()` estimates repeatability, reproducibility, part-to-part variation, total Gage R&R variation, study variation, and number of distinct categories from a balanced `[part, operator, repeat]` study. NIST treats repeatability, reproducibility, stability, bias, and drift as core measurement-process characterization concerns. citeturn400041search1turn400041search8
+`measurement_system.py` provides a balanced crossed Gage R&R screening model with:
 
-The repository deliberately labels this as a screening implementation: a production metrology validation still needs an approved study design, representative parts, controlled operators/conditions, and an appropriate uncertainty budget. Crossed Gage R&R studies are commonly structured with every operator measuring every part repeatedly. citeturn400041search6turn400041search10
+- repeatability;
+- operator/reproducibility variation;
+- interaction;
+- part-to-part variation;
+- total Gage R&R;
+- percent Gage R&R of study variation;
+- NDC screening;
+- rolling drift detection;
+- simple stability trend estimation.
 
-### Process drift
-`process_drift()` provides a lightweight rolling z-score alarm for measurement streams so calibration/inspection outputs can be monitored over time.
+The module is explicitly a screening implementation; formal release should follow the site's approved MSA procedure.
 
-### Inspection-performance benchmarks
-`InspectionBenchmark` separates false accepts, false rejects, precision, recall, F1, and latency. This is the layer where a detector becomes an inspection-system measurement rather than just an algorithm score.
+### Benchmarking
+`benchmarks.py` and `evaluation.py` separate classification performance from latency/system performance. They provide:
 
-## Project structure
+- TP/FP/TN/FN;
+- precision, recall, specificity;
+- false-accept and false-reject rates;
+- F1, balanced accuracy, Matthews correlation;
+- Wilson confidence intervals;
+- mean/P95/P99 latency;
+- throughput estimate.
+
+## Project layout
 
 ```text
 industrial-vision-inspection/
 ├── .github/workflows/ci.yml
+├── docs/
+│   ├── architecture.md
+│   ├── module-reference.md
+│   ├── research-notes.md
+│   ├── uncertainty.md
+│   └── validation-protocol.md
 ├── src/vision_inspection/
+│   ├── __init__.py
 │   ├── acquisition.py
 │   ├── benchmarks.py
 │   ├── calibration.py
@@ -108,6 +188,7 @@ industrial-vision-inspection/
 │   ├── uncertainty.py
 │   └── visualization.py
 ├── tests/
+│   ├── test_advanced.py
 │   ├── test_components.py
 │   ├── test_industrial_validation.py
 │   └── test_inspector.py
@@ -115,14 +196,14 @@ industrial-vision-inspection/
 └── README.md
 ```
 
-## Run locally
+## Local development
 
 ```bash
 python -m venv .venv
 # Linux/macOS
 source .venv/bin/activate
 # Windows
-.venv\Scripts\activate
+.venv\\Scripts\\activate
 
 python -m pip install -e .
 python -m pip install pytest pytest-cov ruff
@@ -132,35 +213,42 @@ pytest --cov=vision_inspection --cov-report=term-missing -q
 python -m compileall -q src tests
 ```
 
-## CLI
+## CLI example
 
 ```bash
-inspect-image part.png \
-  --segmentation otsu \
-  --polarity dark \
-  --min-area 25 \
-  --max-area 100000 \
-  --max-defects 0 \
+inspect-image part.png \\
+  --recipe-version 0.4.0 \\
+  --segmentation otsu \\
+  --segmentation-polarity positive \\
+  --polarity dark \\
+  --min-area 25 \\
+  --max-area 100000 \\
+  --max-defects 0 \\
   --annotated result.png
 ```
 
-The CLI emits structured JSON containing image-quality status, reject reasons, defect count, defect fraction, and defect geometry. Exit code `0` means PASS; exit code `1` means FAIL.
+The CLI emits structured JSON with recipe/image identity, image-quality evidence, reject/diagnostic reasons, processing time, and defect geometry. Exit code `0` is PASS; `1` is FAIL.
 
-## Verification philosophy
+## Validation protocol
 
-Tests use synthetic images and controlled numeric datasets covering segmentation boundaries, acquisition failures, flat-field behavior, calibration persistence, uncertainty propagation, reference residuals, registration, measurement-system analysis, drift, golden-reference traceability, and benchmark metrics.
+Software tests are only one layer. A production release should also demonstrate:
 
-The CI matrix runs Python 3.10, 3.11, and 3.12 with Ruff, coverage-backed pytest, and bytecode compilation.
+1. acquisition timing and trigger integrity;
+2. calibration quality across representative poses;
+3. flat-field stability under production illumination;
+4. metrology bias/repeatability and uncertainty;
+5. crossed Gage R&R or the organization's approved MSA procedure;
+6. locked-set false-accept/false-reject performance with confidence intervals;
+7. cycle-time and tail-latency compliance;
+8. golden-reference and recipe governance;
+9. long-term stability/drift monitoring.
 
-## Production-depth roadmap
+See `docs/validation-protocol.md`.
 
-1. hardware-specific camera adapters (GenICam/vendor SDK) and trigger/encoder synchronization;
-2. validated flat-field and exposure calibration procedures;
-3. production ChArUco/checkerboard calibration capture tooling;
-4. calibrated multi-plane metrology and full uncertainty budgets;
-5. versioned recipe/golden approval workflow and audit trail;
-6. formal crossed/expanded Gage R&R and long-term stability studies;
-7. process control charts and alarm policies beyond rolling z-scores;
-8. benchmark datasets with false-accept / false-reject targets, latency budgets, and confidence intervals;
-9. PLC/MES result interfaces, cycle-time telemetry, and traceability;
-10. learned defect models evaluated against the classical baseline under identical test protocols.
+## Research basis
+
+The architecture is informed by current OpenCV calibration/registration documentation, MVTec HALCON's separation of acquisition/calibration/inspection/metrology/matching concerns, NIST measurement-system guidance, and ISO 5725's distinction between trueness and precision. The detailed source list is maintained in `docs/research-notes.md`.
+
+## Current scope and limits
+
+This repository does not pretend to be a production camera SDK, PLC driver, certified metrology system, or complete MSA package. Those are integration and validation boundaries. The core objective is to provide a rigorous, testable reference implementation on which those systems can be built and benchmarked.
