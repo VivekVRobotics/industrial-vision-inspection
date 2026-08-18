@@ -1,48 +1,90 @@
-"""Flat-field correction for repeatable machine-vision illumination."""
+"""Flat-field illumination calibration and correction.
+
+A flat field estimates multiplicative spatial response from uniform reference
+frames. The implementation uses robust aggregation rather than a single frame,
+rejects invalid calibration fields, and exposes field statistics so calibration
+quality can be reported before deployment.
+"""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 
-def build_flat_field(reference_frames: np.ndarray) -> np.ndarray:
-    """Build a normalized illumination field from uniform reference frames."""
+@dataclass(frozen=True)
+class FlatFieldStats:
+    """Diagnostics for a normalized illumination field."""
+
+    minimum: float
+    maximum: float
+    mean: float
+    std: float
+    coefficient_of_variation: float
+
+
+def build_flat_field(reference_frames: np.ndarray, *, robust: bool = True) -> np.ndarray:
+    """Build a normalized 2-D illumination field from uniform reference frames.
+
+    ``robust=True`` uses the per-pixel median across captures, which is less
+    sensitive than a mean to a transient dust particle, glare event, or bad
+    frame. Calibration captures should still be inspected for stability.
+    """
     frames = np.asarray(reference_frames, dtype=np.float32)
-    if frames.ndim not in {3, 4} or frames.shape[0] < 2:
-        raise ValueError("reference_frames must contain at least two 2D/3D frames")
+    if frames.ndim not in {3, 4} or frames.shape[0] < 3:
+        raise ValueError("reference_frames must contain at least three 2D/3D frames")
     if frames.ndim == 4:
         if frames.shape[3] != 3:
             raise ValueError("color frames must have three channels")
         frames = np.mean(frames, axis=3)
-    if not np.all(np.isfinite(frames)):
-        raise ValueError("reference frames must be finite")
-    field = np.mean(frames, axis=0)
-    median = float(np.median(field))
-    if median <= 0:
+    if not np.all(np.isfinite(frames)) or np.any(frames < 0):
+        raise ValueError("reference frames must be finite and non-negative")
+    field = np.median(frames, axis=0) if robust else np.mean(frames, axis=0)
+    reference_level = float(np.median(field))
+    if reference_level <= 0:
         raise ValueError("reference illumination must have positive median intensity")
-    normalized = field / median
+    normalized = field / reference_level
     return np.clip(normalized, 1e-3, None).astype(np.float32)
 
 
-def apply_flat_field(image: np.ndarray, field: np.ndarray) -> np.ndarray:
+def flat_field_stats(field: np.ndarray) -> FlatFieldStats:
+    """Summarize spatial non-uniformity of a normalized flat field."""
+    values = np.asarray(field, dtype=np.float32)
+    if values.ndim != 2 or not np.all(np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError("field must be a finite positive 2D array")
+    mean = float(np.mean(values))
+    std = float(np.std(values))
+    return FlatFieldStats(float(np.min(values)), float(np.max(values)), mean, std, std / mean if mean else float("inf"))
+
+
+def apply_flat_field(image: np.ndarray, field: np.ndarray, *, clip: bool = True) -> np.ndarray:
     """Correct multiplicative illumination variation using a reference field."""
-    img = np.asarray(image)
+    image_array = np.asarray(image)
     correction = np.asarray(field, dtype=np.float32)
-    if img.ndim != 2 or correction.shape != img.shape:
-        raise ValueError("image and flat-field must be matching 2D arrays")
-    corrected = img.astype(np.float32) / correction
-    if np.issubdtype(img.dtype, np.integer):
-        info = np.iinfo(img.dtype)
+    if correction.ndim != 2 or image_array.shape[:2] != correction.shape:
+        raise ValueError("image and flat-field must have matching spatial dimensions")
+    if not np.all(np.isfinite(correction)) or np.any(correction <= 0):
+        raise ValueError("flat-field must be finite and strictly positive")
+    if image_array.ndim == 3:
+        corrected = image_array.astype(np.float32) / correction[..., None]
+    elif image_array.ndim == 2:
+        corrected = image_array.astype(np.float32) / correction
+    else:
+        raise ValueError("image must be 2D or 3D")
+    if clip and np.issubdtype(image_array.dtype, np.integer):
+        info = np.iinfo(image_array.dtype)
         corrected = np.clip(corrected, info.min, info.max)
-    return corrected.astype(img.dtype)
+    return corrected.astype(image_array.dtype)
 
 
 def smooth_flat_field(field: np.ndarray, kernel_size: int = 31) -> np.ndarray:
-    """Suppress high-frequency sensor noise in a flat-field calibration."""
+    """Remove high-frequency sensor noise from a field while preserving trends."""
     if kernel_size < 3 or kernel_size % 2 == 0:
         raise ValueError("kernel_size must be odd and >=3")
-    field = np.asarray(field, dtype=np.float32)
-    if field.ndim != 2 or not np.all(np.isfinite(field)):
-        raise ValueError("field must be a finite 2D array")
-    return cv2.GaussianBlur(field, (kernel_size, kernel_size), 0)
+    values = np.asarray(field, dtype=np.float32)
+    if values.ndim != 2 or not np.all(np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError("field must be a finite positive 2D array")
+    smoothed = cv2.GaussianBlur(values, (kernel_size, kernel_size), 0)
+    return np.clip(smoothed, 1e-3, None).astype(np.float32)
