@@ -4,10 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "industrial-vision-inspection"
-version = "0.3.0"
-description = "Recipe-driven industrial machine vision with acquisition, calibration, metrology, MSA, drift, and benchmark tooling."
+version = "0.4.0"
+description = "Traceable, explainable industrial machine vision with acquisition, calibration, metrology, MSA, drift, and statistical benchmarking."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "opencv-contrib-python>=4.8"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 
 [project.scripts]
 inspect-image = "vision_inspection.cli:main"
