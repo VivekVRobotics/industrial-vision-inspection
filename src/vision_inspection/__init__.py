@@ -7,7 +7,7 @@ from .metrology import RegionMeasurement, measure_regions
 from .preprocessing import PreprocessConfig
 from .quality import ImageQuality, QualityConfig, assess_image_quality
 from .reference import ReferenceConfig, ReferenceResidual, compare_to_reference
-from .registration import RegistrationResult, rectified_perspective, register_ecc, rectify_perspective
+from .registration import RegistrationResult, register_ecc, rectify_perspective
 
 __all__ = [
     "BinaryConfusion", "CameraCalibration", "Defect", "ImageQuality", "InspectionConfig", "InspectionResult",
