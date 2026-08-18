@@ -1,12 +1,9 @@
 """Recipe-driven, traceable industrial surface-defect inspection engine.
 
-The inspection engine is deliberately a deterministic composition of stages:
-quality gate -> ROI -> illumination normalization -> segmentation -> morphology
--> metrology -> acceptance rules. Each stage produces explainable evidence.
-
-The result object retains recipe identity, input-image digest, measurements, and
-processing time so a production wrapper can correlate a decision with the
-exact image and rule set that produced it.
+The engine composes acquisition-quality checks, ROI handling, illumination
+normalization, segmentation, morphology, metrology, and explicit acceptance
+rules. Results retain traceability information so a decision can be correlated
+to the exact image bytes and recipe configuration that produced it.
 """
 
 from __future__ import annotations
@@ -27,12 +24,7 @@ from .quality import ImageQuality, QualityConfig, assess_image_quality
 
 @dataclass(frozen=True)
 class InspectionConfig:
-    """Immutable inspection recipe.
-
-    A recipe should be versioned outside this class when used in production.
-    ``version`` is included in the evidence digest so changing a threshold or
-    preprocessing parameter creates a different recipe identity.
-    """
+    """Immutable inspection recipe with an auditable version identity."""
 
     version: str = "0.4.0"
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
@@ -84,17 +76,15 @@ class InspectionConfig:
 
     @property
     def recipe_sha256(self) -> str:
-        """Stable digest of recipe configuration used for audit correlation."""
-        payload = repr(self).encode("utf-8")
-        return sha256(payload).hexdigest()
+        """Stable digest of the recipe representation used for traceability."""
+        return sha256(repr(self).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
 class Defect:
-    """Accepted defect candidate plus all measured geometry."""
+    """Accepted defect candidate with measured geometry."""
 
     measurement: RegionMeasurement
-    rule_reasons: tuple[str, ...] = ()
 
     @property
     def area(self) -> float:
@@ -107,7 +97,7 @@ class Defect:
 
 @dataclass(frozen=True)
 class InspectionResult:
-    """Immutable inspection decision and traceability evidence."""
+    """Immutable inspection decision, diagnostics, and traceability evidence."""
 
     passed: bool
     quality: ImageQuality
@@ -122,6 +112,7 @@ class InspectionResult:
     image_sha256: str
     processing_ms: float
     reject_reasons: tuple[str, ...]
+    diagnostic_reasons: tuple[str, ...] = ()
 
 
 def _touches_border(bbox: tuple[int, int, int, int], shape: tuple[int, int]) -> bool:
@@ -154,22 +145,14 @@ def _shift_measurement(measurement: RegionMeasurement, offset: tuple[int, int]) 
     )
 
 
-def inspect_array(
-    image: np.ndarray,
-    config: InspectionConfig | None = None,
-    *,
-    pixel_scale: PixelScale | None = None,
-) -> InspectionResult:
+def inspect_array(image: np.ndarray, config: InspectionConfig | None = None, *, pixel_scale: PixelScale | None = None) -> InspectionResult:
     """Inspect an image array and return a deterministic decision with evidence."""
     started = perf_counter()
     config = config or InspectionConfig()
     values = np.asarray(image)
-    if values.size == 0:
-        raise ValueError("image must not be empty")
-    if not np.issubdtype(values.dtype, np.number):
-        raise ValueError("image pixels must be numeric")
-    image_bytes = values.tobytes(order="C")
-    image_digest = sha256(image_bytes).hexdigest()
+    if values.size == 0 or not np.issubdtype(values.dtype, np.number):
+        raise ValueError("image must be a non-empty numeric array")
+    image_digest = sha256(values.tobytes(order="C")).hexdigest()
     quality = assess_image_quality(values, config.quality)
     gray = to_grayscale(values)
     inspected = gray
@@ -218,21 +201,16 @@ def inspect_array(
         if reasons:
             candidates_rejected += 1
             continue
-        defects.append(Defect(measurement, ()))
+        defects.append(Defect(measurement))
 
     inspected_area = float(inspected.shape[0] * inspected.shape[1])
     defect_fraction = sum(item.area for item in defects) / inspected_area if inspected_area else 0.0
-    reject_reasons: list[str] = list(quality.failures)
-    if config.reject_bad_image_quality and not quality.passed:
-        reject_reasons.append("image_quality_gate")
+    reject_reasons: list[str] = list(quality.failures if config.reject_bad_image_quality else ())
     if len(defects) > config.max_defects:
         reject_reasons.append("max_defect_count_exceeded")
     if defect_fraction > config.max_defect_fraction:
         reject_reasons.append("defect_fraction_exceeded")
-    if candidates_rejected:
-        # This is diagnostic only; rejected candidates are not defects and do not
-        # automatically fail the part unless a rule above is violated.
-        reject_reasons.append(f"candidate_regions_filtered:{candidates_rejected}")
+    diagnostic_reasons = (f"candidate_regions_filtered:{candidates_rejected}",) if candidates_rejected else ()
     passed = not reject_reasons
     return InspectionResult(
         passed=passed,
@@ -248,15 +226,11 @@ def inspect_array(
         image_sha256=image_digest,
         processing_ms=(perf_counter() - started) * 1000.0,
         reject_reasons=tuple(reject_reasons),
+        diagnostic_reasons=diagnostic_reasons,
     )
 
 
-def inspect_image(
-    image_path: str | Path,
-    config: InspectionConfig | None = None,
-    *,
-    pixel_scale: PixelScale | None = None,
-) -> InspectionResult:
+def inspect_image(image_path: str | Path, config: InspectionConfig | None = None, *, pixel_scale: PixelScale | None = None) -> InspectionResult:
     """Load an image from disk and inspect it."""
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
