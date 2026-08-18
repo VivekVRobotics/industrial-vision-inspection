@@ -55,18 +55,12 @@ def compare_to_reference(
     cur_blur = cv2.GaussianBlur(cur_gray.astype(np.uint8), (config.blur_kernel, config.blur_kernel), 0)
     difference = cv2.absdiff(ref_blur, cur_blur)
     _, thresholded = cv2.threshold(difference, config.threshold, 255, cv2.THRESH_BINARY)
-    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(thresholded, connectivity=8)
-    mask = np.zeros_like(thresholded)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresholded, connectivity=8)
+    keep = np.zeros(num_labels, dtype=bool)
     for label in range(1, num_labels):
         area = int(stats[label, cv2.CC_STAT_AREA])
-        if config.min_area_px <= area <= config.max_area_px:
-            mask[stats[label, cv2.CC_STAT_TOP]:stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT],
-                 stats[label, cv2.CC_STAT_LEFT]:stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]] = np.maximum(
-                mask[stats[label, cv2.CC_STAT_TOP]:stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT],
-                     stats[label, cv2.CC_STAT_LEFT]:stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]],
-                thresholded[stats[label, cv2.CC_STAT_TOP]:stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT],
-                            stats[label, cv2.CC_STAT_LEFT]:stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]],
-            )
+        keep[label] = config.min_area_px <= area <= config.max_area_px
+    mask = np.where(keep[labels], 255, 0).astype(np.uint8)
     changed = int(np.count_nonzero(mask))
     total = mask.size
     return ReferenceResidual(
