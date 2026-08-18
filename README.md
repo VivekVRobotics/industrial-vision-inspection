@@ -1,8 +1,8 @@
 # Industrial Vision Inspection
 
-An explainable, recipe-driven machine-vision inspection toolkit for industrial surface defects, geometric measurement, acquisition-quality gating, camera calibration, and inspection-performance evaluation.
+An explainable, recipe-driven machine-vision inspection toolkit for industrial surface defects, geometric measurement, acquisition-quality gating, camera calibration, registration, golden-reference comparison, and inspection-performance evaluation.
 
-This repository is deliberately **classical-vision first**: every acceptance decision can be traced to image quality, preprocessing, segmentation, morphology, geometric measurements, and explicit recipe thresholds. That makes failures inspectable and makes the system useful as a foundation for later learned-vision experiments rather than hiding the process inside a black-box classifier.
+This repository is deliberately **classical-vision first**: every acceptance decision can be traced to acquisition quality, preprocessing, segmentation, morphology, geometric measurements, and explicit recipe thresholds. The result is inspectable and debuggable, while leaving a clear seam for learned-vision experiments later.
 
 ## Architecture
 
@@ -11,58 +11,61 @@ Camera / Image
       │
       ▼
 ┌──────────────────────┐
-│ Image-quality gate   │  exposure / contrast / sharpness / clipping
+│ Acquisition QA       │ exposure / contrast / sharpness / clipping
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│ ROI + preprocessing  │  grayscale / blur / illumination correction
+│ Registration / ROI   │ ECC / perspective rectification / ROI
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│ Segmentation         │  fixed / Otsu / adaptive threshold
+│ Preprocessing        │ grayscale / blur / illumination correction
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│ Morphology           │  opening / closing
+│ Segmentation         │ fixed / Otsu / adaptive threshold
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│ Region extraction    │  contours / geometry
+│ Morphology           │ opening / closing
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│ Metrology            │  area / perimeter / bbox / shape / mm conversion
+│ Region extraction    │ contours / connected components
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│ Acceptance recipe    │  defect count / area / shape / border rules
+│ Metrology            │ geometry / shape / pixel-to-mm
 └──────────┬───────────┘
-           ▼
-     PASS / FAIL + evidence
+           ├───────────────┐
+           ▼               ▼
+   Acceptance rules   Golden reference
+           │          residual comparison
+           └───────┬───────┘
+                   ▼
+             PASS / FAIL
+             + evidence
 ```
 
 ## Implemented engineering layers
 
 ### Inspection recipe
-`InspectionConfig` makes the pipeline explicit and auditable. It controls segmentation mode, illumination model, morphology, defect-size limits, shape limits, ROI, border handling, quality gating, and the final acceptance envelope.
+`InspectionConfig` makes the pipeline explicit and auditable. It controls segmentation mode, illumination model, morphology, defect-size limits, shape limits, ROI, border handling, image-quality gating, and final acceptance rules.
 
 ### Acquisition-quality gating
-Every inspection can measure mean intensity, contrast, Laplacian sharpness, and saturated-pixel fraction before accepting the image as valid evidence. A poor frame can be rejected instead of being misclassified as a good part.
+Every inspection can measure mean intensity, contrast, Laplacian sharpness, and saturated-pixel fraction before treating a frame as valid evidence. A poor frame can be rejected rather than silently becoming a false PASS.
+
+### Registration and rectification
+`register_ecc()` provides intensity-based translation, Euclidean, affine, or homography registration. `rectify_perspective()` maps four ordered corners into a known measurement plane. Registration is an important seam between part pose variation and defect logic.
 
 ### Illumination normalization
-The preprocessing layer supports dark-defect enhancement with black-hat morphology and light-defect enhancement with white/top-hat morphology. This reduces dependence on perfectly uniform background illumination and creates a cleaner segmentation signal.
+Dark defects are enhanced with black-hat morphology and light defects with top-hat morphology. This is an explicit preprocessing stage rather than an implicit threshold-tuning trick.
 
 ### Segmentation
-The pipeline supports:
-
-- fixed thresholding;
-- Otsu automatic thresholding;
-- adaptive Gaussian thresholding.
-
-OpenCV documents adaptive thresholding for locally varying intensity and connected-component analysis for labeled region statistics; these primitives are used here as explainable building blocks. citeturn516940search6turn516940search0
+The pipeline supports fixed, Otsu, and adaptive Gaussian thresholding. OpenCV documents adaptive thresholding for locally varying intensity and connected-component labeling for region statistics; these primitives form the explainable segmentation layer here. citeturn516940search6turn516940search0
 
 ### Morphology
-Optional opening and closing operations provide explicit removal/fill behavior before region measurement.
+Optional opening and closing operations remove small artifacts and bridge/fill local structure before measurement. This follows standard morphology usage in image analysis. citeturn640270search2
 
 ### Metrology
 Detected regions expose:
@@ -74,19 +77,25 @@ Detected regions expose:
 - circularity;
 - extent;
 - solidity;
-- optional physical area/perimeter through a pixel scale.
+- optional physical area/perimeter through `PixelScale`.
 
-Region-property-based measurement is a standard image-analysis pattern; scikit-image documents regionprops for these kinds of geometric measurements. citeturn640270search0turn640270search4
+Region-property-based measurement is a standard inspection pattern; scikit-image documents `regionprops` and related tables for geometric region measurements. citeturn640270search0turn640270search4
 
 ### Camera calibration
-`CameraCalibration` wraps OpenCV intrinsic calibration, distortion correction, persistence, and image-size validation. `PixelScale` converts pixel lengths/areas into physical units for planar inspection.
+`CameraCalibration` wraps OpenCV intrinsic calibration, distortion correction, persistence, and image-size validation. `PixelScale` provides a simple calibrated planar scale for converting pixel geometry to physical units.
+
+### Golden-reference inspection
+`compare_to_reference()` computes a blurred absolute residual between a golden image and an inspected image, thresholds the residual, filters connected components by area, and returns a residual mask plus change statistics. This is useful for stable, repeatable part appearance after registration.
 
 ### Inspection performance
-`evaluation.py` provides part-level confusion matrices and derives precision, recall, specificity, F1, false-accept, and false-reject rates. This separates **algorithm correctness** from **inspection-system performance**.
+`evaluation.py` provides part-level confusion matrices and derives precision, recall, specificity, F1, false-accept, and false-reject rates. This keeps **algorithm behavior** separate from **line-level inspection performance**.
+
+### Visualization
+`annotate_result()` and `save_annotated()` make rejection evidence reviewable by an operator or engineer rather than returning only a binary decision.
 
 ## Why lighting matters
 
-Machine-vision accuracy is not only an algorithm problem. Lighting geometry, direction, color/wavelength, reflection, glare, and shadows directly affect image repeatability. Industrial guidance commonly treats lighting selection as a first-class design decision rather than something to solve after segmentation. citeturn516940search1
+Machine-vision accuracy is not only an algorithm problem. Lighting geometry, direction, color/wavelength, reflection, glare, and shadows strongly affect image repeatability. Industrial guidance treats lighting selection as a first-class design decision because a poor acquisition can overwhelm downstream image processing. citeturn516940search1
 
 The code therefore treats acquisition quality and illumination normalization as explicit stages of the inspection system.
 
@@ -104,8 +113,11 @@ industrial-vision-inspection/
 │   ├── metrology.py
 │   ├── preprocessing.py
 │   ├── quality.py
+│   ├── reference.py
+│   ├── registration.py
 │   └── visualization.py
 ├── tests/
+│   ├── test_advanced.py
 │   ├── test_components.py
 │   └── test_inspector.py
 ├── pyproject.toml
@@ -145,21 +157,21 @@ The CLI emits structured JSON containing acquisition quality, reject reasons, de
 
 ## Verification philosophy
 
-The tests use synthetic images with controlled gradients, defect geometry, ROIs, shape constraints, acquisition failures, calibration persistence, and evaluation labels. This is intentional: an industrial inspection repository needs regression tests around **failure modes and decision boundaries**, not only one happy-path image.
+The tests use synthetic gradients, controlled defect geometry, ROIs, shape constraints, acquisition failures, calibration persistence, registration, reference residuals, and evaluation labels. This is intentional: an industrial inspection repository needs regression tests around **failure modes and decision boundaries**, not only one happy-path image.
 
-The GitHub Actions matrix runs Python 3.10, 3.11, and 3.12 with Ruff, coverage-backed pytest, and bytecode compilation.
+GitHub Actions runs Python 3.10, 3.11, and 3.12 with Ruff, coverage-backed pytest, and bytecode compilation.
 
-## Roadmap
+## Remaining production-depth roadmap
 
-The next production-depth layers are deliberately separate from the current classical baseline:
+The foundation is now strong enough that the next work should focus on validation against real manufacturing data rather than adding arbitrary algorithms:
 
-1. camera drivers and trigger/exposure control;
-2. flat-field and reference-image calibration;
-3. geometric camera calibration using checkerboards/Charuco;
-4. perspective rectification and homography-based metrology;
-5. template/pose registration so part movement does not create false defects;
-6. measurement tolerances and gauge-repeatability studies;
-7. golden-sample / process-drift monitoring;
-8. dataset-backed learned defect models with classical pre/post filters;
-9. PLC/MES result interfaces and cycle-time telemetry;
-10. benchmark datasets with false-accept / false-reject targets and latency budgets.
+1. camera drivers, triggers, exposure and lighting control;
+2. flat-field/reference-image calibration and drift monitoring;
+3. checkerboard/Charuco calibration workflows and reprojection-error reporting;
+4. homography/telecentric metrology with uncertainty estimates;
+5. golden-sample libraries and versioned inspection recipes;
+6. gauge repeatability and reproducibility (GR&R-style) experiments;
+7. labeled benchmark datasets with false-accept / false-reject targets;
+8. learned defect models behind the same deterministic recipe/evidence boundary;
+9. PLC/MES integration and cycle-time telemetry;
+10. long-run process-capability monitoring and model/recipe change control.
